@@ -41,6 +41,10 @@
 #include <sys/un.h>
 #include <sys/utsname.h>
 
+#ifdef ENABLE_SD_NOTIFY
+#include <systemd/sd-daemon.h>
+#endif
+
 #ifndef TRUE
 #define TRUE 1
 #endif
@@ -483,6 +487,9 @@ int main(int argc, char *argv[])
 	   but the cluster is not ready yet */
 	local_sock = open_local_sock();
 	if (local_sock < 0) {
+#ifdef ENABLE_SD_NOTIFY
+		sd_notify(0, "STATUS=clvmd could not create local socket");
+#endif
 		child_init_signal_and_exit(DFAIL_LOCAL_SOCK);
 		/* NOTREACHED */
 	}
@@ -513,6 +520,10 @@ int main(int argc, char *argv[])
 	pthread_cond_init(&lvm_thread_cond, NULL);
 	pthread_barrier_init(&lvm_start_barrier, NULL, 2);
 	init_lvhash();
+
+#ifdef ENABLE_SD_NOTIFY
+	sd_notify(0, "STATUS=Starting the cluster interface");
+#endif
 
 	/* Start the cluster interface */
 	if (cluster_iface == IF_AUTO)
@@ -557,10 +568,16 @@ int main(int argc, char *argv[])
 	if (!clops) {
 		DEBUGLOG("Can't initialise cluster interface\n");
 		log_error("Can't initialise cluster interface\n");
+#ifdef ENABLE_SD_NOTIFY
+		sd_notify(0, "STATUS=Can't initialise cluster interface");
+#endif
 		child_init_signal_and_exit(DFAIL_CLUSTER_IF);
 		/* NOTREACHED */
 	}
 	DEBUGLOG("Cluster ready, doing some more initialisation\n");
+#ifdef ENABLE_SD_NOTIFY
+	sd_notify(0, "STATUS=Cluster ready, doing some more initialisation");
+#endif
 
 	/* Save our CSID */
 	clops->get_our_csid(our_csid);
@@ -573,6 +590,9 @@ int main(int argc, char *argv[])
 	/* Add the local socket to the list */
 	newfd = malloc(sizeof(struct local_client));
 	if (!newfd) {
+#ifdef ENABLE_SD_NOTIFY
+		sd_notify(0, "STATUS=clvmd failed, not enough memory");
+#endif
 		child_init_signal_and_exit(DFAIL_MALLOC);
 		/* NOTREACHED */
 	}
@@ -599,6 +619,9 @@ int main(int argc, char *argv[])
 		clops->cluster_init_completed();
 
 	DEBUGLOG("clvmd ready for work\n");
+#ifdef ENABLE_SD_NOTIFY
+	sd_notify(0, "READY=1\nSTATUS=clvmd ready for work");
+#endif
 	child_init_signal(SUCCESS);
 
 	/* Try to shutdown neatly */
@@ -607,6 +630,10 @@ int main(int argc, char *argv[])
 
 	/* Do some work */
 	main_loop(local_sock, cmd_timeout);
+
+#ifdef ENABLE_SD_NOTIFY
+	sd_notify(0, "STATUS=Shutting down");
+#endif
 
 	pthread_mutex_lock(&lvm_thread_mutex);
 	pthread_cond_signal(&lvm_thread_cond);
@@ -632,6 +659,11 @@ int main(int argc, char *argv[])
 	}
 
 	ret = 0;
+
+#ifdef ENABLE_SD_NOTIFY
+	sd_notify(0, "STATUS=Finished");
+#endif
+
 out:
 	dm_hash_destroy(lvm_params.excl_uuid);
 
