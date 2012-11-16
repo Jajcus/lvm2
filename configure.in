@@ -757,6 +757,34 @@ if test "x$CLVMD" != xnone; then
 fi
 
 ################################################################################
+dnl -- Disable sd_notify
+AC_MSG_CHECKING(whether to enable sd_notify)
+AC_ARG_ENABLE([sd_notify],
+	      AC_HELP_STRING([--disable-sd-notify], 
+	      [disable sd_notify support in clvmd]),
+	      [SD_NOTIFY=$enableval], [SD_NOTIFY=auto])
+AC_MSG_RESULT($SD_NOTIFY)
+
+if test x$SD_NOTIFY != xno ; then
+	if test x$PKGCONFIG_INIT != x1; then
+		pkg_config_init
+	fi
+	PKG_CHECK_MODULES([LIBSYSTEMD_DAEMON], [libsystemd-daemon],
+		[SD_NOTIFY=yes], [
+		   	if test x$SD_NOTIFY = yes ; then
+				AC_MSG_ERROR([bailing out])
+			else
+				SD_NOTIFY=no
+			fi
+		])
+fi
+AC_SUBST([SD_NOTIFY])
+if test x$SD_NOTIFY = xyes; then
+	AC_DEFINE([ENABLE_SD_NOTIFY], [1],
+		  [Define to 1 to include sd_notify() support in clvmd])
+fi
+
+################################################################################
 dnl -- Build cluster mirror log daemon
 AC_MSG_CHECKING(whether to build cluster mirror log daemon)
 AC_ARG_ENABLE(cmirrord,

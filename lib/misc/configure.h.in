@@ -77,6 +77,9 @@
 /* Library version */
 #undef DM_LIB_VERSION
 
+/* Define to 1 to include sd_notify() support in clvmd */
+#undef ENABLE_SD_NOTIFY
+
 /* Define to 1 if you have `alloca', as a function or macro. */
 #undef HAVE_ALLOCA
 
