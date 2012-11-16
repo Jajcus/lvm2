@@ -58,6 +58,7 @@ static void corosync_cpg_confchg_callback(cpg_handle_t handle,
 				 const struct cpg_address *left_list, size_t left_list_entries,
 				 const struct cpg_address *joined_list, size_t joined_list_entries);
 static void _cluster_closedown(void);
+static int _is_quorate(void);
 
 /* Hash list of nodes in the cluster */
 static struct dm_hash_table *node_hash;
@@ -455,7 +456,8 @@ static int _cluster_do_node_callback(struct local_client *master_client,
 		if (ninfo->state != NODE_DOWN)
 			callback(master_client, csid, ninfo->state == NODE_CLVMD);
 		if (ninfo->state != NODE_CLVMD)
-			somedown = -1;
+			if (ninfo->state != NODE_DOWN || !_is_quorate()) 
+				somedown = -1;
 	}
 	return somedown;
 }
@@ -528,7 +530,7 @@ static int _unlock_resource(const char *resource, int lockid)
 	return 0;
 }
 
-static int _is_quorate()
+static int _is_quorate(void)
 {
 	int quorate;
 	if (quorum_getquorate(quorum_handle, &quorate) == CS_OK)
