@@ -74,6 +74,8 @@ static dm_string_mangling_t _name_mangling_mode = DEFAULT_DM_NAME_MANGLING;
 static struct selabel_handle *_selabel_handle = NULL;
 #endif
 
+static int _udev_disabled = 0;
+
 #ifdef UDEV_SYNC_SUPPORT
 static int _semaphore_supported = -1;
 static int _udev_running = -1;
@@ -84,6 +86,9 @@ static int _udev_checking = 1;
 void dm_lib_init(void)
 {
 	const char *env;
+
+	if ((env = getenv("DM_DISABLE_UDEV")))
+		_udev_disabled = 1;
 
 	env = getenv(DM_DEFAULT_NAME_MANGLING_MODE_ENV_VAR_NAME);
 	if (env && *env) {
@@ -1814,6 +1819,26 @@ out:
 	return r;
 }
 
+static void _set_cookie_flags(struct dm_task *dmt, uint16_t flags)
+{
+	if (!dm_cookie_supported())
+		return;
+
+	if (_udev_disabled) {
+		/*
+		 * If udev is disabled, hardcode this functionality:
+		 *   - we want libdm to create the nodes
+		 *   - we don't want the /dev/mapper and any subsystem
+		 *     related content to be created by udev if udev
+		 *     rules are installed
+		 */
+		flags &= ~DM_UDEV_DISABLE_LIBRARY_FALLBACK;
+		flags |= DM_UDEV_DISABLE_DM_RULES_FLAG | DM_UDEV_DISABLE_SUBSYSTEM_RULES_FLAG;
+	}
+
+	dmt->event_nr = flags << DM_UDEV_FLAGS_SHIFT;
+}
+
 #ifndef UDEV_SYNC_SUPPORT
 void dm_udev_set_sync_support(int sync_with_udev)
 {
@@ -1835,8 +1860,8 @@ int dm_udev_get_checking(void)
 
 int dm_task_set_cookie(struct dm_task *dmt, uint32_t *cookie, uint16_t flags)
 {
-	if (dm_cookie_supported())
-		dmt->event_nr = flags << DM_UDEV_FLAGS_SHIFT;
+	_set_cookie_flags(dmt, flags);
+
 	*cookie = 0;
 	dmt->cookie_set = 1;
 
@@ -1908,8 +1933,13 @@ static void _check_udev_sync_requirements_once(void)
 	if (_semaphore_supported < 0)
 		_semaphore_supported = _check_semaphore_is_supported();
 
-	if (_udev_running < 0)
+	if (_udev_running < 0) {
 		_udev_running = _check_udev_is_running();
+		if (_udev_disabled && _udev_running)
+			log_warn("Udev is running and DM_DISABLE_UDEV environment variable is set. "
+				 "Bypassing udev, device-mapper library will manage device "
+				 "nodes in device directory.");
+	}
 }
 
 void dm_udev_set_sync_support(int sync_with_udev)
@@ -1922,8 +1952,8 @@ int dm_udev_get_sync_support(void)
 {
 	_check_udev_sync_requirements_once();
 
-	return _semaphore_supported && dm_cookie_supported() &&
-		_udev_running && _sync_with_udev;
+	return !_udev_disabled && _semaphore_supported &&
+		dm_cookie_supported() &&_udev_running && _sync_with_udev;
 }
 
 void dm_udev_set_checking(int checking)
@@ -2203,8 +2233,7 @@ int dm_task_set_cookie(struct dm_task *dmt, uint32_t *cookie, uint16_t flags)
 {
 	int semid;
 
-	if (dm_cookie_supported())
-		dmt->event_nr = flags << DM_UDEV_FLAGS_SHIFT;
+	_set_cookie_flags(dmt, flags);
 
 	if (!dm_udev_get_sync_support()) {
 		*cookie = 0;

@@ -15,6 +15,7 @@
 
 #include "tools.h"
 #include <sys/stat.h>
+#include <strings.h>
 
 const char *command_name(struct cmd_context *cmd)
 {
@@ -1519,6 +1520,196 @@ int get_activation_monitoring_mode(struct cmd_context *cmd,
 		*monitoring_mode = DMEVENTD_MONITOR_IGNORE;
 
 	return 1;
+}
+
+int get_pool_params(struct cmd_context *cmd,
+		    uint32_t *chunk_size,
+		    thin_discards_t *discards,
+		    uint64_t *pool_metadata_size,
+		    int *zero)
+{
+	const char *dstr;
+
+	if (arg_count(cmd, zero_ARG)) {
+		*zero = strcmp(arg_str_value(cmd, zero_ARG, "y"), "n");
+		log_very_verbose("Setting pool zeroing: %u", *zero);
+	} else
+		*zero = find_config_tree_int(cmd,
+					     "allocation/thin_pool_zero",
+					     DEFAULT_THIN_POOL_ZERO);
+
+	if (arg_count(cmd, discards_ARG)) {
+		*discards = (thin_discards_t) arg_uint_value(cmd, discards_ARG, 0);
+		log_very_verbose("Setting pool discards: %s",
+				 get_pool_discards_name(*discards));
+	} else {
+		dstr = find_config_tree_str(cmd,
+					    "allocation/thin_pool_discards",
+					    DEFAULT_THIN_POOL_DISCARDS);
+		if (!get_pool_discards(dstr, discards))
+			return_0;
+	}
+
+	if (arg_count(cmd, chunksize_ARG)) {
+		if (arg_sign_value(cmd, chunksize_ARG, SIGN_NONE) == SIGN_MINUS) {
+			log_error("Negative chunk size is invalid.");
+			return 0;
+		}
+		*chunk_size = arg_uint_value(cmd, chunksize_ARG,
+					     DM_THIN_MIN_DATA_BLOCK_SIZE);
+		log_very_verbose("Setting pool chunk size: %s",
+				 display_size(cmd, *chunk_size));
+	} else
+		*chunk_size = find_config_tree_int(cmd,
+						   "allocation/thin_pool_chunk_size",
+						   DEFAULT_THIN_POOL_CHUNK_SIZE) * 2;
+
+	if ((*chunk_size < DM_THIN_MIN_DATA_BLOCK_SIZE) ||
+	    (*chunk_size > DM_THIN_MAX_DATA_BLOCK_SIZE)) {
+		log_error("Chunk size must be in the range %s to %s.",
+			  display_size(cmd, DM_THIN_MIN_DATA_BLOCK_SIZE),
+			  display_size(cmd, DM_THIN_MAX_DATA_BLOCK_SIZE));
+		return 0;
+	}
+
+	if (arg_sign_value(cmd, poolmetadatasize_ARG, SIGN_NONE) == SIGN_MINUS) {
+		log_error("Negative pool metadata size is invalid.");
+		return 0;
+	}
+	*pool_metadata_size = arg_uint64_value(cmd, poolmetadatasize_ARG, UINT64_C(0));
+
+	return 1;
+}
+
+int update_pool_params(struct cmd_context *cmd, unsigned attr,
+		       uint32_t data_extents, uint32_t extent_size,
+		       uint32_t *chunk_size, thin_discards_t *discards,
+		       uint64_t *pool_metadata_size)
+{
+	size_t estimate_chunk_size;
+
+	if (!(attr & THIN_FEATURE_BLOCK_SIZE) &&
+	    (*chunk_size & (*chunk_size - 1))) {
+		log_error("Chunk size must be a power of 2 for this thin target version.");
+		return 0;
+	} else if (*chunk_size & (DM_THIN_MIN_DATA_BLOCK_SIZE - 1)) {
+		log_error("Chunk size must be multiple of %s.",
+			  display_size(cmd, DM_THIN_MIN_DATA_BLOCK_SIZE));
+		return 0;
+	}
+
+	if (!*pool_metadata_size) {
+		/* Defaults to nr_pool_blocks * 64b converted to size in sectors */
+		*pool_metadata_size = (uint64_t) data_extents * extent_size /
+			(*chunk_size * (SECTOR_SIZE / UINT64_C(64)));
+		/* Check if we could eventually use bigger chunk size */
+		if (!arg_count(cmd, chunksize_ARG)) {
+			while ((*pool_metadata_size >
+				(DEFAULT_THIN_POOL_OPTIMAL_SIZE / SECTOR_SIZE)) &&
+			       (*chunk_size < DM_THIN_MAX_DATA_BLOCK_SIZE)) {
+				*chunk_size <<= 1;
+				*pool_metadata_size >>= 1;
+			}
+			log_verbose("Setting chunk size to %s.",
+				    display_size(cmd, *chunk_size));
+		} else if (*pool_metadata_size > (2 * DEFAULT_THIN_POOL_MAX_METADATA_SIZE)) {
+			/* Suggest bigger chunk size */
+			estimate_chunk_size = (uint64_t) data_extents * extent_size /
+				(2 * DEFAULT_THIN_POOL_MAX_METADATA_SIZE *
+				 (SECTOR_SIZE / UINT64_C(64)));
+			log_warn("WARNING: Chunk size is too small for pool, suggested minimum is %s.",
+				 display_size(cmd, 1 << (ffs(estimate_chunk_size) + 1)));
+		}
+
+		/* Round up to extent size */
+		if (*pool_metadata_size % extent_size)
+			*pool_metadata_size += extent_size - *pool_metadata_size % extent_size;
+	} else {
+		estimate_chunk_size =  (uint64_t) data_extents * extent_size /
+			(*pool_metadata_size * (SECTOR_SIZE / UINT64_C(64)));
+		/* Check to eventually use bigger chunk size */
+		if (!arg_count(cmd, chunksize_ARG)) {
+			*chunk_size = estimate_chunk_size;
+
+			if (*chunk_size < DM_THIN_MIN_DATA_BLOCK_SIZE)
+				*chunk_size = DM_THIN_MIN_DATA_BLOCK_SIZE;
+			else if (*chunk_size > DM_THIN_MAX_DATA_BLOCK_SIZE)
+				*chunk_size = DM_THIN_MAX_DATA_BLOCK_SIZE;
+
+			log_verbose("Setting chunk size %s.",
+				    display_size(cmd, *chunk_size));
+		} else if (*chunk_size < estimate_chunk_size) {
+			/* Suggest bigger chunk size */
+			log_warn("WARNING: Chunk size is smaller then suggested minimum size %s.",
+				 display_size(cmd, estimate_chunk_size));
+		}
+	}
+
+	if ((uint64_t) *chunk_size > (uint64_t) data_extents * extent_size) {
+		log_error("Chunk size is bigger then pool data size.");
+		return 0;
+	}
+
+	if (*pool_metadata_size > (2 * DEFAULT_THIN_POOL_MAX_METADATA_SIZE)) {
+		if (arg_count(cmd, poolmetadatasize_ARG))
+			log_warn("WARNING: Maximum supported pool metadata size is %s.",
+				 display_size(cmd, 2 * DEFAULT_THIN_POOL_MAX_METADATA_SIZE));
+		*pool_metadata_size = 2 * DEFAULT_THIN_POOL_MAX_METADATA_SIZE;
+	} else if (*pool_metadata_size < (2 * DEFAULT_THIN_POOL_MIN_METADATA_SIZE)) {
+		if (arg_count(cmd, poolmetadatasize_ARG))
+			log_warn("WARNING: Minimum supported pool metadata size is %s.",
+				 display_size(cmd, 2 * DEFAULT_THIN_POOL_MIN_METADATA_SIZE));
+		*pool_metadata_size = 2 * DEFAULT_THIN_POOL_MIN_METADATA_SIZE;
+	}
+
+	log_verbose("Setting pool metadata size to %s.",
+		    display_size(cmd, *pool_metadata_size));
+
+	return 1;
+}
+
+struct logical_volume *alloc_pool_metadata(struct logical_volume *pool_lv,
+					   alloc_policy_t alloc,
+					   const char *name,
+					   struct dm_list *pvh,
+					   uint32_t read_ahead,
+					   uint32_t stripes,
+					   uint32_t stripe_size,
+					   uint64_t size)
+{
+	struct logical_volume *metadata_lv;
+	struct lvcreate_params lvc;
+
+	/* FIXME: Make lvm2api usable */
+	memset(&lvc, 0, sizeof(lvc));
+
+	if (!(lvc.extents = extents_from_size(pool_lv->vg->cmd, size,
+					      pool_lv->vg->extent_size)))
+		return_0;
+
+	if (!(lvc.segtype = get_segtype_from_string(pool_lv->vg->cmd, "striped")))
+		return_0;
+
+	dm_list_init(&lvc.tags);
+
+	/* FIXME: allocate properly space for metadata_lv */
+	lvc.activate = CHANGE_ALY;
+	lvc.alloc = alloc;
+	lvc.lv_name = name;
+	lvc.major = -1;
+	lvc.minor = -1;
+	lvc.permission = LVM_READ | LVM_WRITE;
+	lvc.pvh = pvh;
+	lvc.read_ahead = read_ahead;
+	lvc.stripe_size = stripe_size;
+	lvc.stripes = stripes;
+	lvc.vg_name = pool_lv->vg->name;
+	lvc.zero = 1;
+
+	if (!(metadata_lv = lv_create_single(pool_lv->vg, &lvc)))
+		return_0;
+
+	return metadata_lv;
 }
 
 /*

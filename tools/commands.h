@@ -147,13 +147,16 @@ xx(lvconvert,
    "--thinpool ThinPoolLogicalVolume[Path]\n"
    "\t[--chunksize size]\n"
    "\t[--discards {ignore|nopassdown|passdown}]\n"
-   "\t[[--poolmetadatasize size] | --poolmetadata ThinMetadataLogicalVolume[Path]]\n"
+   "\t[--poolmetadata ThinMetadataLogicalVolume[Path] |\n"
+   "\t [--poolmetadatasize size]\n"
+   "\t [-r|--readahead ReadAheadSectors|auto|none]\n"
+   "\t [--stripes Stripes [-I|--stripesize StripeSize]]]\n"
    "\t[-Z|--zero {y|n}]\n"
    "\t[-d|--debug] [-h|-?|--help] [-v|--verbose]\n",
 
    alloc_ARG, background_ARG, chunksize_ARG, corelog_ARG, interval_ARG,
    merge_ARG, mirrorlog_ARG, mirrors_ARG, name_ARG, noudevsync_ARG,
-   regionsize_ARG, repair_ARG, replace_ARG, snapshot_ARG, splitmirrors_ARG,
+   readahead_ARG, regionsize_ARG, repair_ARG, replace_ARG, snapshot_ARG, splitmirrors_ARG,
    trackchanges_ARG, type_ARG, stripes_long_ARG, stripesize_ARG, test_ARG,
    chunksize_ARG, discards_ARG, poolmetadata_ARG, poolmetadatasize_ARG, thinpool_ARG,
    use_policies_ARG, yes_ARG, force_ARG, zero_ARG)
@@ -722,6 +725,7 @@ xx(vgcfgrestore,
    "vgcfgrestore " "\n"
    "\t[-d|--debug] " "\n"
    "\t[-f|--file filename] " "\n"
+   "\t[--force]\n"
    "\t[-l[l]|--list [--list]]" "\n"
    "\t[-M|--metadatatype 1|2]" "\n"
    "\t[-h|--help]" "\n"
@@ -730,7 +734,7 @@ xx(vgcfgrestore,
    "\t[--version] " "\n"
    "\tVolumeGroupName",
 
-   file_ARG, list_ARG, metadatatype_ARG, test_ARG)
+   file_ARG, force_long_ARG, list_ARG, metadatatype_ARG, test_ARG)
 
 xx(vgchange,
    "Change volume group attributes",

@@ -4367,14 +4367,8 @@ static struct logical_volume *_lv_create_an_lv(struct volume_group *vg, struct l
 				log_warn("WARNING: See global/mirror_segtype_default in lvm.conf.");
 			}
 
-			if (!lv_is_active(org)) {
-				log_error("Check for existence of active snapshot "
-					  "origin '%s' failed.", org->name);
-				return NULL;
-			}
-			origin_active = 1;
-
-			if (vg_is_clustered(vg) &&
+			if ((origin_active = lv_is_active(org)) &&
+			    vg_is_clustered(vg) &&
 			    !lv_is_active_exclusive_locally(org)) {
 				log_error("%s must be active exclusively to"
 					  " create snapshot", org->name);
@@ -4714,8 +4708,8 @@ revert_new_lv:
 	return NULL;
 }
 
-int lv_create_single(struct volume_group *vg,
-		     struct lvcreate_params *lp)
+struct logical_volume *lv_create_single(struct volume_group *vg,
+					struct lvcreate_params *lp)
 {
 	struct logical_volume *lv;
 
@@ -4743,5 +4737,5 @@ int lv_create_single(struct volume_group *vg,
 out:
 	log_print_unless_silent("Logical volume \"%s\" created", lv->name);
 
-	return 1;
+	return lv;
 }

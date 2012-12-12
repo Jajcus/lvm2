@@ -39,8 +39,10 @@ struct lvconvert_params {
 	uint32_t keep_mimages;
 	uint32_t stripes;
 	uint32_t stripe_size;
+	uint32_t read_ahead;
 
 	const struct segment_type *segtype;
+	unsigned target_attr;
 
 	alloc_policy_t alloc;
 
@@ -155,12 +157,21 @@ static int _read_params(struct lvconvert_params *lp, struct cmd_context *cmd,
 	int pagesize = lvm_getpagesize();
 
 	memset(lp, 0, sizeof(*lp));
+	lp->target_attr = ~0;
 
 	if ((arg_count(cmd, snapshot_ARG) || arg_count(cmd, merge_ARG)) &&
 	    (arg_count(cmd, mirrorlog_ARG) || arg_count(cmd, mirrors_ARG) ||
 	     arg_count(cmd, repair_ARG))) {
 		log_error("--snapshot or --merge argument cannot be mixed "
 			  "with --mirrors, --repair or --mirrorlog");
+		return 0;
+	}
+
+	if ((arg_count(cmd, stripes_long_ARG) || arg_count(cmd, stripesize_ARG)) &&
+	    !(arg_count(cmd, mirrors_ARG) || arg_count(cmd, repair_ARG) ||
+	      arg_count(cmd, thinpool_ARG))) {
+		log_error("--stripes or --stripesize argument is only valid "
+			  "with --mirrors, --repair or --thinpool");
 		return 0;
 	}
 
@@ -268,6 +279,8 @@ static int _read_params(struct lvconvert_params *lp, struct cmd_context *cmd,
 	if (lp->merge) {	/* Snapshot merge */
 		if (arg_count(cmd, regionsize_ARG) || arg_count(cmd, chunksize_ARG) ||
 		    arg_count(cmd, zero_ARG) || arg_count(cmd, regionsize_ARG) ||
+		    arg_count(cmd, poolmetadata_ARG) || arg_count(cmd, poolmetadatasize_ARG) ||
+		    arg_count(cmd, readahead_ARG) ||
 		    arg_count(cmd, stripes_long_ARG) || arg_count(cmd, stripesize_ARG)) {
 			log_error("Only --background and --interval are valid "
 				  "arguments for snapshot merge");
@@ -335,52 +348,20 @@ static int _read_params(struct lvconvert_params *lp, struct cmd_context *cmd,
 			return 0;
 		}
 
+		if (!get_pool_params(cmd,
+				     &lp->chunk_size,
+				     &lp->discards,
+				     &lp->poolmetadata_size,
+				     &lp->zero))
+			return_0;
+
 		if (arg_count(cmd, poolmetadata_ARG)) {
+			if (arg_count(cmd, poolmetadatasize_ARG)) {
+				log_error("--poolmetadatasize is invalid with --poolmetadata.");
+				return 0;
+			}
 			lp->pool_metadata_lv_name = arg_str_value(cmd, poolmetadata_ARG, "");
-		} else if (arg_count(cmd, poolmetadatasize_ARG)) {
-			if (arg_sign_value(cmd, poolmetadatasize_ARG, SIGN_NONE) == SIGN_MINUS) {
-				log_error("Negative pool metadata size is invalid.");
-				return 0;
-			}
-			lp->poolmetadata_size = arg_uint64_value(cmd, poolmetadatasize_ARG, UINT64_C(0));
-
-			if (lp->poolmetadata_size > (2 * DEFAULT_THIN_POOL_MAX_METADATA_SIZE)) {
-				if (arg_count(cmd, poolmetadatasize_ARG))
-					log_warn("WARNING: Maximum supported pool metadata size is 16GB.");
-				lp->poolmetadata_size = 2 * DEFAULT_THIN_POOL_MAX_METADATA_SIZE;
-			} else if (lp->poolmetadata_size < (2 * DEFAULT_THIN_POOL_MIN_METADATA_SIZE)) {
-				if (arg_count(cmd, poolmetadatasize_ARG))
-					log_warn("WARNING: Minimum supported pool metadata size is 2M.");
-				lp->poolmetadata_size = 2 * DEFAULT_THIN_POOL_MIN_METADATA_SIZE;
-			}
-
-			log_verbose("Setting pool metadata size to %" PRIu64 " sectors.",
-				    lp->poolmetadata_size);
 		}
-
-		if (arg_count(cmd, chunksize_ARG)) {
-			if (arg_sign_value(cmd, chunksize_ARG, SIGN_NONE) == SIGN_MINUS) {
-				log_error("Negative chunk size is invalid.");
-				return 0;
-			}
-			lp->chunk_size = arg_uint_value(cmd, chunksize_ARG,
-							DM_THIN_MIN_DATA_BLOCK_SIZE);
-
-			if ((lp->chunk_size < DM_THIN_MIN_DATA_BLOCK_SIZE) ||
-			    (lp->chunk_size > DM_THIN_MAX_DATA_BLOCK_SIZE)) {
-				log_error("Chunk size must be in the range %uK to %uK.",
-					  (DM_THIN_MIN_DATA_BLOCK_SIZE / 2),
-					  (DM_THIN_MAX_DATA_BLOCK_SIZE / 2));
-				return 0;
-			}
-		} else
-			lp->chunk_size = DM_THIN_MIN_DATA_BLOCK_SIZE;
-
-		log_verbose("Setting pool metadata chunk size to %u sectors.",
-			    lp->chunk_size);
-
-		if (arg_count(cmd, zero_ARG))
-			lp->zero = strcmp(arg_str_value(cmd, zero_ARG, "y"), "n");
 
 		/* If --thinpool contains VG name, extract it. */
 		if ((tmp_str = strchr(lp->pool_data_lv_name, (int) '/'))) {
@@ -460,7 +441,7 @@ static int _read_params(struct lvconvert_params *lp, struct cmd_context *cmd,
 	}
 
 	if (activation() && lp->segtype && lp->segtype->ops->target_present &&
-	    !lp->segtype->ops->target_present(cmd, NULL, NULL)) {
+	    !lp->segtype->ops->target_present(cmd, NULL, &lp->target_attr)) {
 		log_error("%s: Required device-mapper target(s) not "
 			  "detected in your kernel", lp->segtype->name);
 		return 0;
@@ -833,13 +814,13 @@ static void _lvconvert_mirrors_repair_ask(struct cmd_context *cmd,
 		return;
 	}
 
-	if (yes)
-		return;
-
 	if (force != PROMPT) {
 		*replace_log = *replace_mirrors = 0;
 		return;
 	}
+
+	if (yes)
+		return;
 
 	if (failed_log &&
 	    yes_no_prompt("Attempt to replace failed mirror log? [y/n]: ") == 'n') {
@@ -1550,29 +1531,31 @@ static void _lvconvert_raid_repair_ask(struct cmd_context *cmd, int *replace_dev
 	int force = arg_count(cmd, force_ARG);
 	int yes = arg_count(cmd, yes_ARG);
 
-	*replace_dev = 0;
+	*replace_dev = 1;
 
 	if (arg_count(cmd, use_policies_ARG)) {
 		dev_policy = find_config_tree_str(cmd, "activation/raid_fault_policy", DEFAULT_RAID_FAULT_POLICY);
 
 		if (!strcmp(dev_policy, "allocate") ||
 		    !strcmp(dev_policy, "replace"))
-			*replace_dev = 1;
-		/* else if (!strcmp(dev_policy, "anything_else")) -- ignore */
+			return;
+
+		/* else if (!strcmp(dev_policy, "anything_else")) -- no replace */
+		*replace_dev = 0;
 		return;
 	}
 
-	if (yes) {
-		*replace_dev = 1;
+	if (force != PROMPT) {
+		*replace_dev = 0;
 		return;
 	}
 
-	if (force != PROMPT)
+	if (yes)
 		return;
 
 	if (yes_no_prompt("Attempt to replace failed RAID images "
-			  "(requires full device resync)? [y/n]: ") == 'y') {
-		*replace_dev = 1;
+			  "(requires full device resync)? [y/n]: ") == 'n') {
+		*replace_dev = 0;
 	}
 }
 
@@ -1821,12 +1804,20 @@ static int _lvconvert_thinpool(struct cmd_context *cmd,
 {
 	int r = 0;
 	char *name;
+	const char *old_name;
 	int len;
 	struct lv_segment *seg;
 	struct logical_volume *data_lv;
 	struct logical_volume *metadata_lv;
+	struct logical_volume *pool_metadata_lv;
 
-	if (lv_is_thin_type(pool_lv)) {
+	if (!lv_is_visible(pool_lv)) {
+		log_error("Can't convert internal LV %s/%s.",
+			  pool_lv->vg->name, pool_lv->name);
+		return 0;
+	}
+
+	if (lv_is_thin_type(pool_lv) && !lp->pool_metadata_lv_name) {
 		log_error("Can't use thin logical volume %s/%s for thin pool data.",
 			  pool_lv->vg->name, pool_lv->name);
 		return 0;
@@ -1834,19 +1825,48 @@ static int _lvconvert_thinpool(struct cmd_context *cmd,
 
 	/* We are changing target type, so deactivate first */
 	if (!deactivate_lv(cmd, pool_lv)) {
-		log_error("Can't deactivate logical volume %s/%s.",
+		log_error("Aborting. Failed to deactivate logical volume %s/%s.",
 			  pool_lv->vg->name, pool_lv->name);
 		return 0;
 	}
 
+	len = strlen(pool_lv->name) + 16;
+	if (!(name = dm_pool_alloc(pool_lv->vg->vgmem, len))) {
+		log_error("Can't allocate new name.");
+		return 0;
+	}
+
+	if (dm_snprintf(name, len, "%s_tmeta", pool_lv->name) < 0) {
+		log_error("Failed to create layer name.");
+		return 0;
+	}
+
 	if (lp->pool_metadata_lv_name) {
+		if (arg_count(cmd, stripesize_ARG) || arg_count(cmd, stripes_long_ARG)) {
+			log_error("Can't use --stripes and --stripesize with --poolmetadata.");
+			return 0;
+		}
+		if (arg_count(cmd, readahead_ARG)) {
+			log_error("Can't use --readahead with --poolmetadata.");
+			return 0;
+		}
 		metadata_lv = find_lv(pool_lv->vg, lp->pool_metadata_lv_name);
 		if (!metadata_lv) {
-			log_error("Unknown metadata LV %s", lp->pool_metadata_lv_name);
+			log_error("Unknown metadata LV %s.", lp->pool_metadata_lv_name);
+			return 0;
+		}
+		if (!lv_is_visible(metadata_lv)) {
+			log_error("Can't convert internal LV %s/%s.",
+				  metadata_lv->vg->name, metadata_lv->name);
+			return 0;
+		}
+		if (metadata_lv->status & LOCKED) {
+			log_error("Can't convert locked LV %s/%s.",
+				  metadata_lv->vg->name, metadata_lv->name);
 			return 0;
 		}
 		if (metadata_lv == pool_lv) {
-			log_error("Can't use same LV for thin data and metadata LV %s",
+			log_error("Can't use same LV for thin pool data and metadata LV %s.",
 				  lp->pool_metadata_lv_name);
 			return 0;
 		}
@@ -1856,37 +1876,95 @@ static int _lvconvert_thinpool(struct cmd_context *cmd,
 				  metadata_lv->vg->name, metadata_lv->name);
 			return 0;
 		}
-	} else if (arg_count(cmd, poolmetadatasize_ARG)) {
-		/* FIXME: allocate metadata LV! */
-		metadata_lv = NULL;
-		log_error("Uncreated metadata.");
-		return 0;
-	} else {
-		log_error("Uknown metadata.");
-		return 0;
-	}
 
-	len = strlen(pool_lv->name) + 16;
-	if (!(name = dm_pool_alloc(pool_lv->vg->vgmem, len))) {
-		log_error("Cannot allocate new name.");
-		return 0;
-	}
+		/* Swap normal LV with pool's metadata LV ? */
+		if (lv_is_thin_pool(pool_lv)) {
+			if (!deactivate_lv(cmd, metadata_lv)) {
+				log_error("Aborting. Failed to deactivate thin metadata lv.");
+				return 0;
+			}
+			if (!arg_count(cmd, yes_ARG) &&
+			    yes_no_prompt("Do you want to swap metadata of %s/%s pool with "
+					  "volume %s/%s? [y/n]: ",
+					  pool_lv->vg->name, pool_lv->name,
+					  pool_lv->vg->name, metadata_lv->name) == 'n') {
+				log_error("Conversion aborted.");
+				return 0;
+			}
+			seg = first_seg(pool_lv);
+			/* Swap names between old and new metadata LV */
+			if (!detach_pool_metadata_lv(seg, &pool_metadata_lv))
+				return_0;
+			old_name = metadata_lv->name;
+			if (!lv_rename_update(cmd, metadata_lv, "pvmove_tmeta", 0))
+				return_0;
+			if (!lv_rename_update(cmd, pool_metadata_lv, old_name, 0))
+				return_0;
 
-	if (!lv_is_active(metadata_lv)) {
-		if (!deactivate_lv(cmd, metadata_lv)) {
-			log_error("Can't deactivate logical volume %s/%s.",
-				  metadata_lv->vg->name, metadata_lv->name);
-			return 0;
+			if (!arg_count(cmd, chunksize_ARG))
+				lp->chunk_size = seg->chunk_size;
+			else if ((lp->chunk_size != seg->chunk_size) &&
+				 !arg_count(cmd, force_ARG) &&
+				 yes_no_prompt("Do you really want to change chunk size %s to %s for %s/%s "
+					       "pool volume? [y/n]: ", display_size(cmd, seg->chunk_size),
+					       display_size(cmd, lp->chunk_size),
+					       pool_lv->vg->name, pool_lv->name) == 'n') {
+				log_error("Conversion aborted.");
+				return 0;
+			}
+			if (!arg_count(cmd, discards_ARG))
+				lp->discards = seg->discards;
+			if (!arg_count(cmd, zero_ARG))
+				lp->zero = seg->zero_new_blocks;
+
+			goto mda_write;
 		}
-		if (!activate_lv_local(cmd, metadata_lv)) {
+
+		if (!lv_is_active(metadata_lv) &&
+		    !activate_lv_local(cmd, metadata_lv)) {
 			log_error("Aborting. Failed to activate thin metadata lv.");
 			return 0;
 		}
-	}
+		if (!set_lv(cmd, metadata_lv, UINT64_C(0), 0)) {
+			log_error("Aborting. Failed to wipe thin metadata lv.");
+			return 0;
+		}
 
-	if (!set_lv(cmd, metadata_lv, UINT64_C(0), 0)) {
-		log_error("Aborting. Failed to wipe thin metadata lv.");
-		return 0;
+		lp->poolmetadata_size =
+			(uint64_t) metadata_lv->le_count * metadata_lv->vg->extent_size;
+		if (lp->poolmetadata_size > (2 * DEFAULT_THIN_POOL_MAX_METADATA_SIZE)) {
+			log_warn("WARNING: Maximum size used by metadata is %s, rest is unused.",
+				 display_size(cmd, 2 * DEFAULT_THIN_POOL_MAX_METADATA_SIZE));
+			lp->poolmetadata_size = 2 * DEFAULT_THIN_POOL_MAX_METADATA_SIZE;
+		} else if (lp->poolmetadata_size < (2 * DEFAULT_THIN_POOL_MIN_METADATA_SIZE)) {
+			log_error("Logical volume %s/%s is too small (<%s) for metadata.",
+				  metadata_lv->vg->name, metadata_lv->name,
+				  display_size(cmd, 2 * DEFAULT_THIN_POOL_MIN_METADATA_SIZE));
+			return 0;
+		}
+		if (!update_pool_params(cmd, lp->target_attr,
+					pool_lv->le_count, pool_lv->vg->extent_size,
+					&lp->chunk_size, &lp->discards,
+					&lp->poolmetadata_size))
+			return_0;
+	} else {
+		if (!update_pool_params(cmd, lp->target_attr,
+					pool_lv->le_count, pool_lv->vg->extent_size,
+					&lp->chunk_size, &lp->discards,
+					&lp->poolmetadata_size))
+			return_0;
+
+		if (!get_stripe_params(cmd, &lp->stripes, &lp->stripe_size))
+			return_0;
+		/* Hmm _read_activation_params */
+		lp->read_ahead = arg_uint_value(cmd, readahead_ARG,
+						cmd->default_settings.read_ahead);
+
+		if (!(metadata_lv = alloc_pool_metadata(pool_lv, lp->alloc, name,
+							lp->pvh, lp->read_ahead,
+							lp->stripes, lp->stripe_size,
+							lp->poolmetadata_size)))
+			return_0;
 	}
 
 	if (!deactivate_lv(cmd, metadata_lv)) {
@@ -1894,14 +1972,6 @@ static int _lvconvert_thinpool(struct cmd_context *cmd,
 			  "Manual intervention required.");
 		return 0;
 	}
-
-	if (dm_snprintf(name, len, "%s_tmeta", pool_lv->name) < 0)
-		return_0;
-
-	/* Rename deactivated metadata LV to have _tmeta suffix */
-	/* Implicit checks if metadata_lv is visible */
-	if (!lv_rename_update(cmd, metadata_lv, name, 0))
-		return_0;
 
 	/*
 	 * Since we wish to have underlaying dev, to match _tdata
@@ -1920,18 +1990,26 @@ static int _lvconvert_thinpool(struct cmd_context *cmd,
 	seg->segtype = lp->segtype;
 	seg->lv->status |= THIN_POOL;
 
-	seg->chunk_size = lp->chunk_size;
-	seg->zero_new_blocks = lp->zero ? 1 : 0;
-	seg->discards = lp->discards;
-	seg->low_water_mark = 0;
-	seg->transaction_id = 0;
-
-	if (!attach_pool_metadata_lv(seg, metadata_lv))
-		return_0;
-
 	/* Drop reference as attach_pool_data_lv() takes it again */
 	remove_seg_from_segs_using_this_lv(data_lv, seg);
 	if (!attach_pool_data_lv(seg, data_lv))
+		return_0;
+
+	seg->low_water_mark = 0;
+	seg->transaction_id = 0;
+
+mda_write:
+	seg->chunk_size = lp->chunk_size;
+	seg->discards = lp->discards;
+	seg->zero_new_blocks = lp->zero ? 1 : 0;
+
+	/* Rename deactivated metadata LV to have _tmeta suffix */
+	/* Implicit checks if metadata_lv is visible */
+	if (strcmp(metadata_lv->name, name) &&
+	    !lv_rename_update(cmd, metadata_lv, name, 0))
+		return_0;
+
+	if (!attach_pool_metadata_lv(seg, metadata_lv))
 		return_0;
 
 	if (!vg_write(pool_lv->vg) || !vg_commit(pool_lv->vg))
@@ -1940,6 +2018,11 @@ static int _lvconvert_thinpool(struct cmd_context *cmd,
 	if (!activate_lv_excl(cmd, pool_lv)) {
 		log_error("Failed to activate pool logical volume %s/%s.",
 			  pool_lv->vg->name, pool_lv->name);
+		/* Deactivate subvolumes */
+		if (!deactivate_lv(cmd, seg_lv(seg, 0)))
+			log_error("Failed to deactivate pool data logical volume.");
+		if (!deactivate_lv(cmd, seg->metadata_lv))
+			log_error("Failed to deactivate pool metadata logical volume.");
 		goto out;
 	}
 

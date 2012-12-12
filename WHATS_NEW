@@ -1,5 +1,28 @@
 Version 2.02.99 - 
 ===================================
+  Allow lvconvert --stripes/stripesize only with --mirrors/--repair/--thinpool.
+  Fix memleak in device_is_usable mirror testing function.
+  Do not ignore -f in lvconvert --repair -y -f for mirror and raid volumes.
+  Disallow pvmove on RAID LVs until they are addressed properly
+  Allow empty activation/{auto_activation|read_only|}_volume_list config option.
+  Add lvm.conf option global/thin_disabled_features.
+  Add lvconvert support to swap thin pool metadata volume.
+  Implement internal function detach_pool_metadata_lv().
+  Fix lvm2app to return all property sizes in bytes.
+  Recognize DM_DISABLE_UDEV environment variable for a complete fallback.
+  Do not verify udev operations if --noudevsync command option is used.
+  Fix lvm2app and return lvseg discards property as string.
+  Allow forced vgcfgrestore of lvm2 metadata with thin volumes.
+  Recognise STEC skd devices in filter.
+  Recognise Violin Memory vtms devices in filter.
+  Add lvm.conf thin pool defs thin_pool_{chunk_size|discards|zero}.
+  Support discards for non-power-of-2 thin pool chunks.
+  Automatically restore MISSING PVs with no MDAs.
+  When no '-i' argument is given for RAID10, default to 2 stripes.
+  Do not allow --splitmirrors on RAID10 logical volumes.
+  Skip mlocking [vectors] on arm architecture.
+  Support allocation of pool metadata with lvconvert command.
+  Move common functionality for thin lvcreate and lvconvert to toollib.
   Mirrored log is now fixed before its mirror when double-fault occurs.
   Add python-lvm unit test case
   Exit pvscan --cache immediately if cluster locking used or lvmetad not used.
