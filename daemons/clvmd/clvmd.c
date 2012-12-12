@@ -971,8 +971,8 @@ static void main_loop(int local_sock, int cmd_timeout)
 			}
 		}
 
-		/* Select timed out. Check for clients that have been waiting too long for a response */
-		if (select_status == 0) {
+		/* Check for clients that have been waiting too long for a response */
+		if (select_status >= 0) {
 			time_t the_time = time(NULL);
 
 			for (thisfd = &local_client_head; thisfd != NULL;
